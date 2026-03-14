@@ -1,0 +1,10 @@
+20260314
+
+I want to create a media manager
+
+That can import files into a structured date format.
+Identify and Ignore duplicates.
+
+Apply properties
+
+backup
