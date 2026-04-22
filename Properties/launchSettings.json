@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "media_manager": {
+      "commandName": "Project",
+      "commandLineArgs": "check AOVJ8631.HEIC"
+    }
+  }
+}
