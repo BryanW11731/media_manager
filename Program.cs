@@ -1,5 +1,14 @@
 ﻿namespace media_manager
 {
+    /// <summary>
+    /// What are some commands that I must have
+    /// 1) -import <source folder> <destination folder>
+    ///    If destination folder does not exist then create it.
+    ///    if destination folder does exist then confirm is it structured appropriately
+    ///    Scan source folder and sub folders for media files
+    ///    When one is found, extract the original date time field and use that to decide where it goes.
+    ///        also get the files sha and store in the sha_index.
+    /// </summary>
     internal class Program
     {
         static void DisplayUsage()
@@ -16,7 +25,7 @@
                 int last_index = index + 0x10;
 
                 Console.Write("{0:X4} ", line_index);
-
+                 
                 while (index < last_index)
                 {
                     if ((index % 4) == 0)
@@ -64,6 +73,170 @@
 
                 line_index += 0x10;
             }
+        }
+        static string? GetDateTimeOriginal_HEIC(string path)
+        {
+            string? result = null;
+            try
+            {
+                int index = path.LastIndexOf(".HEIC");
+                if (index != (path.Length - 5))
+                {
+                    throw new Exception("missing HEIC extension");
+                }
+
+                //Console.WriteLine("Checking \"{0}\"", path);
+                FileStream stream = File.OpenRead(path);
+                BinaryReader br = new BinaryReader(stream);
+                mm_file file = new mm_file(br);
+                mm_file_box box = new mm_file_box(file);
+                if (box.Name != "ftyp")
+                {
+                    throw new Exception("missing ftyp box type");
+                }
+                if (box.RemainingLength < 8)
+                {
+                    throw new Exception("ftyp Length to short");
+                }
+                string str = box.ReadCharsAsString(4);
+                if (str != "heic")
+                {
+                    throw new Exception("missing heic as major brand");
+                }
+                UInt32 minor_version = box.ReadUInt32BE();
+                if (minor_version != 0)
+                {
+                    throw new Exception(string.Format("minor_version = {0}, expected 0", minor_version));
+                }
+                if ((box.RemainingLength % 4) != 0)
+                {
+                    throw new Exception("ftyp Length not a multiple of 4");
+                }
+                bool found = false;
+                while (box.RemainingLength >= 4)
+                {
+                    str = box.ReadCharsAsString(4);
+                    if (str == "heic")
+                    {
+                        found = true;
+                    }
+                }
+                if (!found)
+                {
+                    throw new Exception("ftyp missing heic in compatible_brands");
+                }
+                mm_file_box meta_box = new mm_file_box(file);
+                if (meta_box.Name != "meta")
+                {
+                    throw new Exception("missing meta box type");
+                }
+                byte meta_version = meta_box.ReadBytes(1)[0];
+                if (meta_version != 0)
+                {
+                    throw new Exception(string.Format("meta_version = {0}, expected 0", meta_version));
+                }
+                byte[] meta_flags = meta_box.ReadBytes(3);
+                if ((meta_flags[0] != 0) || (meta_flags[1] != 0) || (meta_flags[2] != 0))
+                {
+                    throw new Exception("meta_flags != 0");
+                }
+                //Console.WriteLine("size of meta box is {0} (0x{0:X4})", meta_box.Length);
+                mm_item_info? itemInfo = null;
+                mm_item_location? itemLocation = null;
+                //byte[] data = null;
+                while (meta_box.RemainingLength > 0)
+                {
+                    box = meta_box.ReadBox();
+                    //Console.WriteLine("found sub box \"{0}\"", box.Name);
+                    if (box.Name == "iinf")
+                    {
+                        //data = box.ReadBytes((int)box.Length);
+                        //Dump(data);
+                        //box.Position = 0;
+                        if (itemInfo != null)
+                        {
+                            throw new Exception("duplicat iinf found");
+                        }
+                        itemInfo = new mm_item_info(box);
+                        //int count = itemInfo.CountType("hvc1");
+                        //Console.WriteLine("iinf box: hvc1 count = {0}",
+                        //    count);
+                        //int count = itemInfo.CountType("Exif");
+                        //Console.WriteLine("iinf box: Exif count = {0}",
+                        //    count);
+                    }
+                    if (box.Name == "iloc")
+                    {
+                        if (itemLocation != null)
+                        {
+                            throw new Exception("duplicate iloc found");
+                        }
+                        itemLocation = new mm_item_location(box);
+                    }
+                }
+                if (itemInfo == null)
+                {
+                    throw new Exception("iinf not found");
+                }
+                if (itemLocation == null)
+                {
+                    throw new Exception("iloc not found");
+                }
+                if (itemInfo.CountType("Exif") != 1)
+                {
+                    throw new Exception("expected one and only one Exif section");
+                }
+                UInt16 id = itemInfo.GetID("Exif", 0);
+                mm_item_location_element? element = itemLocation.GetElementByID(id);
+                if (element == null)
+                {
+                    throw new Exception("cannot find Exif element in iloc");
+                }
+                //Console.WriteLine("Found Exif at {0:X8}, length {1}",
+                //    element.Offset, element.Length);
+                mm_file_region exif_region = new mm_file_region(file, element.Offset, element.Length);
+                mm_exif exif = new mm_exif(exif_region);
+                mm_tiff_header tiff = exif.Tiff;
+                mm_file_region tiff_region = exif.TiffRegion;
+                UInt32 ifd_offset = tiff.IfdOffset;
+                while (ifd_offset > 0)
+                {
+                    //Console.WriteLine("Found IFD at 0x{0:X4}", ifd_offset);
+                    tiff_region.Position = ifd_offset;
+                    mm_tiff_ifd ifd = new mm_tiff_ifd(tiff_region);
+                    for (int i = 0; i < ifd.Length; i++)
+                    {
+                        if (ifd[i].Tag == 0x8769)
+                        {
+                            //Console.WriteLine("Found Tag 0x8769, Type = {0}, VO = {1}",
+                            //    ifd[i].Type, ifd[i].ValueOffset);
+                            tiff_region.Position = ifd[i].ValueOffset;
+                            mm_tiff_ifd exifSubIfd = new mm_tiff_ifd(tiff_region);
+                            for (int j = 0; j < exifSubIfd.Length; j++)
+                            {
+                                //Console.WriteLine("Found inside exifSufIfd, tag = 0x{0:X4}",
+                                //    exifSubIfd[j].Tag);
+                                if (exifSubIfd[j].Tag == 0x9003)
+                                {
+                                    //Console.WriteLine("Found Tag 0x9003, Type = {0}, count = {1}, VO = {2}",
+                                    //    exifSubIfd[j].Type, exifSubIfd[j].Count, exifSubIfd[j].ValueOffset);
+                                    tiff_region.Position = exifSubIfd[j].ValueOffset;
+                                    result = tiff_region.ReadString();
+                                    //Console.WriteLine("  DateTimeOriginal = \"{0}\"",
+                                    //    result);
+                                }
+                            }
+                        }
+                    }
+                    ifd_offset = ifd.NextIfdOffset;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("CheckFile: exception, {0}", ex.Message);
+                return null;
+            }
+            return result;
         }
         static bool CheckFile(string path)
         {
@@ -133,14 +306,14 @@
                     Console.WriteLine("meta_flags != 0");
                     return false;
                 }
-                Console.WriteLine("size of meta box is {0} (0x{0:X4})", meta_box.Length);
+                //Console.WriteLine("size of meta box is {0} (0x{0:X4})", meta_box.Length);
                 mm_item_info? itemInfo = null;
                 mm_item_location? itemLocation = null;
                 //byte[] data = null;
                 while (meta_box.RemainingLength > 0)
                 {
                     box = meta_box.ReadBox();
-                    Console.WriteLine("found sub box \"{0}\"", box.Name);
+                    //Console.WriteLine("found sub box \"{0}\"", box.Name);
                     if (box.Name == "iinf")
                     {
                         //data = box.ReadBytes((int)box.Length);
@@ -151,12 +324,12 @@
                             throw new Exception("duplicat iinf found");
                         }
                         itemInfo = new mm_item_info(box);
-                        int count = itemInfo.CountType("hvc1");
-                        Console.WriteLine("iinf box: hvc1 count = {0}",
-                            count);
-                        count = itemInfo.CountType("Exif");
-                        Console.WriteLine("iinf box: Exif count = {0}",
-                            count);
+                        //int count = itemInfo.CountType("hvc1");
+                        //Console.WriteLine("iinf box: hvc1 count = {0}",
+                        //    count);
+                        //int count = itemInfo.CountType("Exif");
+                        //Console.WriteLine("iinf box: Exif count = {0}",
+                        //    count);
                     }
                     if (box.Name == "iloc")
                     {
@@ -185,8 +358,8 @@
                 {
                     throw new Exception("cannot find Exif element in iloc");
                 }
-                Console.WriteLine("Found Exif at {0:X8}, length {1}",
-                    element.Offset, element.Length);
+                //Console.WriteLine("Found Exif at {0:X8}, length {1}",
+                //    element.Offset, element.Length);
                 mm_file_region exif_region = new mm_file_region(file, element.Offset, element.Length);
                 mm_exif exif = new mm_exif(exif_region);
                 mm_tiff_header tiff = exif.Tiff;
@@ -194,25 +367,25 @@
                 UInt32 ifd_offset = tiff.IfdOffset;
                 while (ifd_offset > 0)
                 {
-                    Console.WriteLine("Found IFD at 0x{0:X4}", ifd_offset);
+                    //Console.WriteLine("Found IFD at 0x{0:X4}", ifd_offset);
                     tiff_region.Position = ifd_offset;
                     mm_tiff_ifd ifd = new mm_tiff_ifd(tiff_region);
                     for (int i = 0; i < ifd.Length; i++)
                     {
                         if (ifd[i].Tag == 0x8769)
                         {
-                            Console.WriteLine("Found Tag 0x8769, Type = {0}, VO = {1}",
-                                ifd[i].Type, ifd[i].ValueOffset);
+                            //Console.WriteLine("Found Tag 0x8769, Type = {0}, VO = {1}",
+                            //    ifd[i].Type, ifd[i].ValueOffset);
                             tiff_region.Position = ifd[i].ValueOffset;
                             mm_tiff_ifd exifSubIfd = new mm_tiff_ifd(tiff_region);
                             for (int j = 0; j < exifSubIfd.Length; j++)
                             {
-                                Console.WriteLine("Found inside exifSufIfd, tag = 0x{0:X4}",
-                                    exifSubIfd[j].Tag);
+                                //Console.WriteLine("Found inside exifSufIfd, tag = 0x{0:X4}",
+                                //    exifSubIfd[j].Tag);
                                 if (exifSubIfd[j].Tag == 0x9003)
                                 {
-                                    Console.WriteLine("Found Tag 0x9003, Type = {0}, count = {1}, VO = {2}",
-                                        exifSubIfd[j].Type, exifSubIfd[j].Count, exifSubIfd[j].ValueOffset);
+                                    //Console.WriteLine("Found Tag 0x9003, Type = {0}, count = {1}, VO = {2}",
+                                    //    exifSubIfd[j].Type, exifSubIfd[j].Count, exifSubIfd[j].ValueOffset);
                                     tiff_region.Position = exifSubIfd[j].ValueOffset;
                                     string DateTimeOriginal = tiff_region.ReadString();
                                     Console.WriteLine("  DateTimeOriginal = \"{0}\"",
@@ -236,6 +409,26 @@
         }
         static void Main(string[] args)
         {
+#if true
+            Command? command = Command.GetCommand(args);
+            if (command != null)
+            {
+                args = args.TakeLast(args.Length - 1).ToArray();
+                if ((args.Length >= 1) && (args[0] == "--help"))
+                {
+                    command.DisplayUsage();
+                }
+                else
+                {
+                    command.ParseArguments(args);
+                    command.Run();
+                }
+            }
+            else
+            {
+                Command.DisplayCommandList();
+            }
+#else
             Console.WriteLine("Hello, World!");
             if (args.Length > 0)
             {
@@ -398,11 +591,18 @@
                         Console.WriteLine("{0} Failed", args[1]);
                     }
                 }
+                if (args[0] == "date")
+                {
+                    string? date = GetDateTimeOriginal_HEIC(args[1]);
+                    Console.WriteLine("File: {0}", args[1]);
+                    Console.WriteLine("DateTime: {0}", date);
+                }
             }
             else
             {
                 Console.WriteLine("no args");
             }
+#endif
         }
     }
 }
